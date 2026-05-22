@@ -1,0 +1,261 @@
+# Fluxo Profissional de Detecção de Mudança Ambiental com Python
+import numpy as np
+import matplotlib.pyplot as plt
+import rasterio
+from rasterio.features import shapes
+from scipy.ndimage import binary_opening
+import geopandas as gpd
+from shapely.geometry import shape
+from matplotlib.colors import LinearSegmentedColormap
+
+# ======================================================
+# CAMINHO DAS IMAGENS
+# ======================================================
+
+imagem_2023 = r"C:\Users\raissa.alves\Documents\projeto\landsat_2023.tif"
+imagem_2024 = r"C:\Users\raissa.alves\Documents\projeto\landsat_2024.tif"
+
+# ======================================================
+# LEITURA DAS BANDAS
+# ======================================================
+
+print("Lendo imagens...")
+
+with rasterio.open(imagem_2023) as src2023:
+
+    red_2023 = src2023.read(4).astype(np.float32)
+    nir_2023 = src2023.read(5).astype(np.float32)
+
+    perfil = src2023.profile
+    transform = src2023.transform
+    crs = src2023.crs
+
+with rasterio.open(imagem_2024) as src2024:
+
+    red_2024 = src2024.read(4).astype(np.float32)
+    nir_2024 = src2024.read(5).astype(np.float32)
+
+# ======================================================
+# NDVI
+# ======================================================
+
+print("Calculando NDVI...")
+
+ndvi_2023 = (nir_2023 - red_2023) / (
+    nir_2023 + red_2023 + 0.0001
+)
+
+ndvi_2024 = (nir_2024 - red_2024) / (
+    nir_2024 + red_2024 + 0.0001
+)
+
+# ======================================================
+# DIFERENÇA TEMPORAL
+# ======================================================
+
+print("Calculando diferença temporal...")
+
+ndvi_diff = ndvi_2024 - ndvi_2023
+
+# ======================================================
+# THRESHOLD
+# ======================================================
+
+threshold = 2 * np.std(ndvi_diff)
+
+print(f"Threshold: {threshold:.4f}")
+
+# ======================================================
+# MÁSCARA DE MUDANÇA
+# ======================================================
+
+change_mask = np.abs(ndvi_diff) > threshold
+
+# ======================================================
+# REMOÇÃO DE RUÍDO
+# ======================================================
+
+print("Removendo ruído...")
+
+change_mask_clean = binary_opening(
+    change_mask,
+    structure=np.ones((3, 3))
+)
+
+# ======================================================
+# ESTATÍSTICAS
+# ======================================================
+
+print("\n===== RESULTADOS =====")
+
+print(f"NDVI mínimo: {ndvi_diff.min():.4f}")
+print(f"NDVI máximo: {ndvi_diff.max():.4f}")
+
+print(f"Pixels alterados: {change_mask_clean.sum():,}")
+
+print(
+    f"Percentual alterado: "
+    f"{100 * change_mask_clean.mean():.2f}%"
+)
+
+# ======================================================
+# EXPORTAR RASTER
+# ======================================================
+
+print("\nSalvando raster...")
+
+perfil.update(
+    dtype=rasterio.uint8,
+    count=1,
+    compress="lzw"
+)
+
+with rasterio.open(
+    "mascara_ndvi.tif",
+    "w",
+    **perfil
+) as dst:
+
+    dst.write(
+        change_mask_clean.astype(rasterio.uint8),
+        1
+    )
+
+print("Raster salvo!")
+
+# ======================================================
+# VETORIZAÇÃO
+# ======================================================
+
+print("Vetorizando alterações...")
+
+results = (
+    {"properties": {"value": v}, "geometry": s}
+    for s, v in shapes(
+        change_mask_clean.astype(np.int16),
+        mask=change_mask_clean,
+        transform=transform
+    )
+)
+
+geoms = list(results)
+
+if len(geoms) > 0:
+
+    gdf = gpd.GeoDataFrame.from_features(
+        geoms,
+        crs=crs
+    )
+
+    # ==================================================
+    # CALCULAR ÁREA
+    # ==================================================
+
+    gdf["area_m2"] = gdf.geometry.area
+    gdf["area_ha"] = gdf["area_m2"] / 10000
+
+    # ==================================================
+    # FILTRAR POLÍGONOS PEQUENOS
+    # ==================================================
+
+    gdf = gdf[gdf["area_ha"] > 0.5]
+
+    # ==================================================
+    # EXPORTAR SHAPEFILE
+    # ==================================================
+
+    gdf.to_file("mudancas_ndvi.shp")
+
+    print("Shapefile salvo!")
+
+    print(f"Polígonos detectados: {len(gdf)}")
+
+else:
+
+    print("Nenhuma alteração detectada.")
+
+# ======================================================
+# VISUALIZAÇÃO
+# ======================================================
+
+print("Gerando visualização...")
+
+fig, axes = plt.subplots(1, 4, figsize=(22, 6))
+
+# ------------------------------------------------------
+# NDVI 2023
+# ------------------------------------------------------
+cores_ndvi = LinearSegmentedColormap.from_list(
+    "ndvi_custom",
+    [
+        "#8B0000",   # vermelho escuro
+        "#FF4500",   # laranja/vermelho
+        "#FFD700",   # amarelo
+        "#ADFF2F",   # verde claro
+        "#006400"    # verde escuro
+    ]
+)
+
+img1 = axes[0].imshow(
+    ndvi_2023,
+    cmap=cores_ndvi,
+    vmin=0,
+    vmax=1
+)
+axes[0].set_title("NDVI 2023")
+axes[0].axis("off")
+
+# ------------------------------------------------------
+# NDVI 2024
+# ------------------------------------------------------
+
+cores_ndvi = LinearSegmentedColormap.from_list(
+    "ndvi_custom",
+    [
+        "#8B0000",   # vermelho escuro
+        "#FF4500",   # laranja/vermelho
+        "#FFD700",   # amarelo
+        "#ADFF2F",   # verde claro
+        "#006400"    # verde escuro
+    ]
+)
+
+img1 = axes[1].imshow(
+    ndvi_2024,
+    cmap=cores_ndvi,
+    vmin=0,
+    vmax=1
+)
+axes[1].set_title("NDVI 2024")
+axes[0].axis("off")
+# ------------------------------------------------------
+# DIFERENÇA
+# ------------------------------------------------------
+
+img3 = axes[2].imshow(
+    ndvi_diff,
+    cmap="RdBu",
+    vmin=-0.5,
+    vmax=0.5
+)
+
+axes[2].set_title("Diferença NDVI")
+axes[2].axis("off")
+
+# ------------------------------------------------------
+# MÁSCARA
+# ------------------------------------------------------
+
+axes[3].imshow(
+    change_mask_clean,
+    cmap="Reds"
+)
+
+axes[3].set_title("Máscara de Mudança")
+axes[3].axis("off")
+
+plt.tight_layout()
+
+plt.show()
+
+print("\nProcessamento concluído!")
