@@ -1,11 +1,15 @@
-# Fluxo Profissional de Detecção de Mudança Ambiental com Python
+# ======================================================
+# FLUXO PROFISSIONAL DE DETECÇÃO DE MUDANÇA AMBIENTAL
+# NDVI + DETECÇÃO TEMPORAL + VETORIZAÇÃO
+# ======================================================
+
 import numpy as np
 import matplotlib.pyplot as plt
 import rasterio
+import geopandas as gpd
+
 from rasterio.features import shapes
 from scipy.ndimage import binary_opening
-import geopandas as gpd
-from shapely.geometry import shape
 from matplotlib.colors import LinearSegmentedColormap
 
 # ======================================================
@@ -13,10 +17,27 @@ from matplotlib.colors import LinearSegmentedColormap
 # ======================================================
 
 imagem_2023 = r"C:\Users\raissa.alves\Documents\projeto\landsat_2023.tif"
+
 imagem_2024 = r"C:\Users\raissa.alves\Documents\projeto\landsat_2024.tif"
 
 # ======================================================
-# LEITURA DAS BANDAS
+# SAÍDAS
+# ======================================================
+
+saida_raster = (
+    r"C:\Users\raissa.alves\Documents\projeto\mascara_ndvi.tif"
+)
+
+saida_shp = (
+    r"C:\Users\raissa.alves\Documents\projeto\mudancas_ndvi.shp"
+)
+
+saida_png = (
+    r"C:\Users\raissa.alves\Documents\projeto\resultado_ndvi.png"
+)
+
+# ======================================================
+# LEITURA DAS IMAGENS
 # ======================================================
 
 print("Lendo imagens...")
@@ -36,18 +57,37 @@ with rasterio.open(imagem_2024) as src2024:
     nir_2024 = src2024.read(5).astype(np.float32)
 
 # ======================================================
+# REMOVER VALORES INVÁLIDOS
+# ======================================================
+
+red_2023[red_2023 == 0] = np.nan
+nir_2023[nir_2023 == 0] = np.nan
+
+red_2024[red_2024 == 0] = np.nan
+nir_2024[nir_2024 == 0] = np.nan
+
+# ======================================================
 # NDVI
 # ======================================================
 
 print("Calculando NDVI...")
 
-ndvi_2023 = (nir_2023 - red_2023) / (
-    nir_2023 + red_2023 + 0.0001
+ndvi_2023 = (
+    (nir_2023 - red_2023)
+    / (nir_2023 + red_2023 + 0.0001)
 )
 
-ndvi_2024 = (nir_2024 - red_2024) / (
-    nir_2024 + red_2024 + 0.0001
+ndvi_2024 = (
+    (nir_2024 - red_2024)
+    / (nir_2024 + red_2024 + 0.0001)
 )
+
+# ======================================================
+# LIMITAR NDVI
+# ======================================================
+
+ndvi_2023 = np.clip(ndvi_2023, -1, 1)
+ndvi_2024 = np.clip(ndvi_2024, -1, 1)
 
 # ======================================================
 # DIFERENÇA TEMPORAL
@@ -58,29 +98,46 @@ print("Calculando diferença temporal...")
 ndvi_diff = ndvi_2024 - ndvi_2023
 
 # ======================================================
-# THRESHOLD
+# THRESHOLD ADAPTATIVO
 # ======================================================
 
-threshold = 2 * np.std(ndvi_diff)
+threshold = np.nanpercentile(
+    np.abs(ndvi_diff),
+    92
+)
 
 print(f"Threshold: {threshold:.4f}")
 
 # ======================================================
-# MÁSCARA DE MUDANÇA
+# MÁSCARAS DE MUDANÇA
 # ======================================================
 
-change_mask = np.abs(ndvi_diff) > threshold
+# perda vegetal
+loss_mask = ndvi_diff < -threshold
+
+# ganho vegetal
+gain_mask = ndvi_diff > threshold
+
+# máscara geral
+change_mask = loss_mask | gain_mask
 
 # ======================================================
-# REMOÇÃO DE RUÍDO
+# REMOVER RUÍDO
 # ======================================================
 
 print("Removendo ruído...")
 
-change_mask_clean = binary_opening(
-    change_mask,
-    structure=np.ones((3, 3))
+loss_mask = binary_opening(
+    loss_mask,
+    structure=np.ones((2, 2))
 )
+
+gain_mask = binary_opening(
+    gain_mask,
+    structure=np.ones((2, 2))
+)
+
+change_mask_clean = loss_mask | gain_mask
 
 # ======================================================
 # ESTATÍSTICAS
@@ -88,10 +145,13 @@ change_mask_clean = binary_opening(
 
 print("\n===== RESULTADOS =====")
 
-print(f"NDVI mínimo: {ndvi_diff.min():.4f}")
-print(f"NDVI máximo: {ndvi_diff.max():.4f}")
+print(f"NDVI mínimo: {np.nanmin(ndvi_diff):.4f}")
+print(f"NDVI máximo: {np.nanmax(ndvi_diff):.4f}")
 
-print(f"Pixels alterados: {change_mask_clean.sum():,}")
+print(
+    f"Pixels alterados: "
+    f"{change_mask_clean.sum():,}"
+)
 
 print(
     f"Percentual alterado: "
@@ -107,11 +167,12 @@ print("\nSalvando raster...")
 perfil.update(
     dtype=rasterio.uint8,
     count=1,
-    compress="lzw"
+    compress="lzw",
+    nodata=0
 )
 
 with rasterio.open(
-    "mascara_ndvi.tif",
+    saida_raster,
     "w",
     **perfil
 ) as dst:
@@ -130,15 +191,19 @@ print("Raster salvo!")
 print("Vetorizando alterações...")
 
 results = (
-    {"properties": {"value": v}, "geometry": s}
+    {"properties": {"value": int(v)}, "geometry": s}
     for s, v in shapes(
-        change_mask_clean.astype(np.int16),
+        change_mask_clean.astype(np.uint8),
         mask=change_mask_clean,
         transform=transform
     )
 )
 
 geoms = list(results)
+
+# ======================================================
+# GERAR SHAPEFILE
+# ======================================================
 
 if len(geoms) > 0:
 
@@ -148,27 +213,48 @@ if len(geoms) > 0:
     )
 
     # ==================================================
-    # CALCULAR ÁREA
+    # REMOVER GEOMETRIAS INVÁLIDAS
+    # ==================================================
+
+    gdf = gdf[gdf.geometry.notnull()]
+
+    # ==================================================
+    # ÁREA
     # ==================================================
 
     gdf["area_m2"] = gdf.geometry.area
-    gdf["area_ha"] = gdf["area_m2"] / 10000
+
+    gdf["area_ha"] = (
+        gdf["area_m2"] / 10000
+    )
 
     # ==================================================
-    # FILTRAR POLÍGONOS PEQUENOS
+    # FILTRO DE ÁREA
     # ==================================================
 
-    gdf = gdf[gdf["area_ha"] > 0.5]
+    gdf = gdf[gdf["area_ha"] > 0.05]
 
     # ==================================================
     # EXPORTAR SHAPEFILE
     # ==================================================
 
-    gdf.to_file("mudancas_ndvi.shp")
+    if len(gdf) > 0:
 
-    print("Shapefile salvo!")
+        gdf.to_file(saida_shp)
 
-    print(f"Polígonos detectados: {len(gdf)}")
+        print("Shapefile salvo!")
+
+        print(
+            f"Polígonos detectados: "
+            f"{len(gdf)}"
+        )
+
+    else:
+
+        print(
+            "Nenhum polígono passou "
+            "no filtro de área."
+        )
 
 else:
 
@@ -180,86 +266,133 @@ else:
 
 print("Gerando visualização...")
 
-fig, axes = plt.subplots(1, 4, figsize=(22, 6))
+fig, axes = plt.subplots(
+    1,
+    4,
+    figsize=(24, 6)
+)
 
-# ------------------------------------------------------
-# NDVI 2023
-# ------------------------------------------------------
+# ======================================================
+# PALETA NDVI
+# ======================================================
+
 cores_ndvi = LinearSegmentedColormap.from_list(
     "ndvi_custom",
     [
-        "#8B0000",   # vermelho escuro
-        "#FF4500",   # laranja/vermelho
-        "#FFD700",   # amarelo
-        "#ADFF2F",   # verde claro
-        "#006400"    # verde escuro
+        "#8B0000",
+        "#FF4500",
+        "#FFD700",
+        "#ADFF2F",
+        "#006400"
     ]
 )
+
+# ======================================================
+# NDVI 2023
+# ======================================================
 
 img1 = axes[0].imshow(
     ndvi_2023,
     cmap=cores_ndvi,
-    vmin=np.nanpercentile(ndvi_2023, 2),
-    vmax=np.nanpercentile(ndvi_2023, 98)
+    vmin=np.nanpercentile(ndvi_2023, 5),
+    vmax=np.nanpercentile(ndvi_2023, 95)
 )
+
 axes[0].set_title("NDVI 2023")
 axes[0].axis("off")
 
-# ------------------------------------------------------
-# NDVI 2024
-# ------------------------------------------------------
-
-cores_ndvi = LinearSegmentedColormap.from_list(
-    "ndvi_custom",
-    [
-        "#8B0000",   # vermelho escuro
-        "#FF4500",   # laranja/vermelho
-        "#FFD700",   # amarelo
-        "#ADFF2F",   # verde claro
-        "#006400"    # verde escuro
-    ]
+plt.colorbar(
+    img1,
+    ax=axes[0],
+    fraction=0.046
 )
 
-img1 = axes[1].imshow(
+# ======================================================
+# NDVI 2024
+# ======================================================
+
+img2 = axes[1].imshow(
     ndvi_2024,
     cmap=cores_ndvi,
-    vmin=np.nanpercentile(ndvi_2023, 2),
-    vmax=np.nanpercentile(ndvi_2023, 98)
+    vmin=np.nanpercentile(ndvi_2024, 5),
+    vmax=np.nanpercentile(ndvi_2024, 95)
 )
+
 axes[1].set_title("NDVI 2024")
-axes[0].axis("off")
-# ------------------------------------------------------
-# DIFERENÇA
-# ------------------------------------------------------
+axes[1].axis("off")
+
+plt.colorbar(
+    img2,
+    ax=axes[1],
+    fraction=0.046
+)
+
+# ======================================================
+# DIFERENÇA NDVI
+# ======================================================
 
 img3 = axes[2].imshow(
     ndvi_diff,
-    cmap="RdBu",
-    vmin=-0.5,
-    vmax=0.5
+    cmap="seismic",
+    vmin=-0.2,
+    vmax=0.2
 )
 
 axes[2].set_title("Diferença NDVI")
 axes[2].axis("off")
 
-# ------------------------------------------------------
-# MÁSCARA
-# ------------------------------------------------------
-
-axes[3].imshow(
-    change_mask_clean,
-    cmap="Reds"
+plt.colorbar(
+    img3,
+    ax=axes[2],
+    fraction=0.046
 )
 
-axes[3].set_title("Máscara de Mudança")
+# ======================================================
+# MAPA COLORIDO DE MUDANÇAS
+# ======================================================
+
+change_map = np.zeros(ndvi_diff.shape)
+
+# perda vegetal
+change_map[loss_mask] = -1
+
+# ganho vegetal
+change_map[gain_mask] = 1
+
+img4 = axes[3].imshow(
+    change_map,
+    cmap="RdYlGn",
+    vmin=-1,
+    vmax=1
+)
+
+axes[3].set_title("Mudanças Detectadas")
 axes[3].axis("off")
+
+plt.colorbar(
+    img4,
+    ax=axes[3],
+    fraction=0.046
+)
+
+# ======================================================
+# SALVAR FIGURA
+# ======================================================
 
 plt.tight_layout()
 
 plt.savefig(
-    r"C:\Users\raissa.alves\Documents\projeto\resultado_ndvi.png",
+    saida_png,
     dpi=300,
     bbox_inches="tight"
 )
+
 print("Imagem salva!")
+
+# ======================================================
+# MOSTRAR RESULTADO
+# ======================================================
+
+plt.show()
+
 print("\nProcessamento concluído!")
