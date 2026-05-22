@@ -1,6 +1,6 @@
 # ======================================================
-# FLUXO PROFISSIONAL DE DETECÇÃO DE MUDANÇA AMBIENTAL
-# NDVI + DETECÇÃO TEMPORAL + VETORIZAÇÃO
+# FLUXO PROFISSIONAL DE MUDANÇA AMBIENTAL
+# NDVI + DETECÇÃO DE VEGETAÇÃO ARBÓREA
 # ======================================================
 
 import numpy as np
@@ -34,6 +34,18 @@ saida_shp = (
 
 saida_png = (
     r"C:\Users\raissa.alves\Documents\projeto\resultado_ndvi.png"
+)
+
+saida_veg_2023 = (
+    r"C:\Users\raissa.alves\Documents\projeto\vegetacao_2023.shp"
+)
+
+saida_veg_2024 = (
+    r"C:\Users\raissa.alves\Documents\projeto\vegetacao_2024.shp"
+)
+
+saida_veg_perdida = (
+    r"C:\Users\raissa.alves\Documents\projeto\vegetacao_perdida.shp"
 )
 
 # ======================================================
@@ -103,22 +115,19 @@ ndvi_diff = ndvi_2024 - ndvi_2023
 
 threshold = np.nanpercentile(
     np.abs(ndvi_diff),
-    92
+    90
 )
 
 print(f"Threshold: {threshold:.4f}")
 
 # ======================================================
-# MÁSCARAS DE MUDANÇA
+# DETECÇÃO DE MUDANÇA
 # ======================================================
 
-# perda vegetal
 loss_mask = ndvi_diff < -threshold
 
-# ganho vegetal
 gain_mask = ndvi_diff > threshold
 
-# máscara geral
 change_mask = loss_mask | gain_mask
 
 # ======================================================
@@ -140,13 +149,23 @@ gain_mask = binary_opening(
 change_mask_clean = loss_mask | gain_mask
 
 # ======================================================
+# DETECÇÃO DE VEGETAÇÃO ARBÓREA
+# ======================================================
+
+print("Detectando vegetação arbórea...")
+
+tree_mask_2023 = ndvi_2023 > 0.45
+
+tree_mask_2024 = ndvi_2024 > 0.45
+
+# vegetação perdida
+trees_lost = tree_mask_2023 & ~tree_mask_2024
+
+# ======================================================
 # ESTATÍSTICAS
 # ======================================================
 
 print("\n===== RESULTADOS =====")
-
-print(f"NDVI mínimo: {np.nanmin(ndvi_diff):.4f}")
-print(f"NDVI máximo: {np.nanmax(ndvi_diff):.4f}")
 
 print(
     f"Pixels alterados: "
@@ -156,6 +175,21 @@ print(
 print(
     f"Percentual alterado: "
     f"{100 * change_mask_clean.mean():.2f}%"
+)
+
+print(
+    f"Vegetação arbórea 2023: "
+    f"{tree_mask_2023.sum():,}"
+)
+
+print(
+    f"Vegetação arbórea 2024: "
+    f"{tree_mask_2024.sum():,}"
+)
+
+print(
+    f"Vegetação perdida: "
+    f"{trees_lost.sum():,}"
 )
 
 # ======================================================
@@ -185,42 +219,36 @@ with rasterio.open(
 print("Raster salvo!")
 
 # ======================================================
-# VETORIZAÇÃO
+# FUNÇÃO EXPORTAR SHAPEFILE
 # ======================================================
 
-print("Vetorizando alterações...")
+def exportar_shapefile(mask, saida):
 
-results = (
-    {"properties": {"value": int(v)}, "geometry": s}
-    for s, v in shapes(
-        change_mask_clean.astype(np.uint8),
-        mask=change_mask_clean,
-        transform=transform
+    resultados = (
+        {
+            "properties": {"value": int(v)},
+            "geometry": s
+        }
+        for s, v in shapes(
+            mask.astype(np.uint8),
+            mask=mask,
+            transform=transform
+        )
     )
-)
 
-geoms = list(results)
+    geoms = list(resultados)
 
-# ======================================================
-# GERAR SHAPEFILE
-# ======================================================
+    if len(geoms) == 0:
 
-if len(geoms) > 0:
+        print(f"Nenhum dado para {saida}")
+        return
 
     gdf = gpd.GeoDataFrame.from_features(
         geoms,
         crs=crs
     )
 
-    # ==================================================
-    # REMOVER GEOMETRIAS INVÁLIDAS
-    # ==================================================
-
     gdf = gdf[gdf.geometry.notnull()]
-
-    # ==================================================
-    # ÁREA
-    # ==================================================
 
     gdf["area_m2"] = gdf.geometry.area
 
@@ -228,37 +256,46 @@ if len(geoms) > 0:
         gdf["area_m2"] / 10000
     )
 
-    # ==================================================
-    # FILTRO DE ÁREA
-    # ==================================================
-
-    gdf = gdf[gdf["area_ha"] > 0.05]
-
-    # ==================================================
-    # EXPORTAR SHAPEFILE
-    # ==================================================
+    # filtro reduzido
+    gdf = gdf[gdf["area_ha"] > 0.03]
 
     if len(gdf) > 0:
 
-        gdf.to_file(saida_shp)
+        gdf.to_file(saida)
 
-        print("Shapefile salvo!")
-
-        print(
-            f"Polígonos detectados: "
-            f"{len(gdf)}"
-        )
+        print(f"Shapefile salvo: {saida}")
 
     else:
 
         print(
-            "Nenhum polígono passou "
-            "no filtro de área."
+            f"Nenhum polígono válido em {saida}"
         )
 
-else:
+# ======================================================
+# EXPORTAR SHAPEFILES
+# ======================================================
 
-    print("Nenhuma alteração detectada.")
+print("\nExportando shapefiles...")
+
+exportar_shapefile(
+    change_mask_clean,
+    saida_shp
+)
+
+exportar_shapefile(
+    tree_mask_2023,
+    saida_veg_2023
+)
+
+exportar_shapefile(
+    tree_mask_2024,
+    saida_veg_2024
+)
+
+exportar_shapefile(
+    trees_lost,
+    saida_veg_perdida
+)
 
 # ======================================================
 # VISUALIZAÇÃO
@@ -268,22 +305,25 @@ print("Gerando visualização...")
 
 fig, axes = plt.subplots(
     1,
-    4,
-    figsize=(24, 6)
+    5,
+    figsize=(30, 7)
 )
 
 # ======================================================
-# PALETA NDVI
+# NOVA PALETA NDVI
 # ======================================================
 
 cores_ndvi = LinearSegmentedColormap.from_list(
-    "ndvi_custom",
+    "ndvi_profissional",
     [
-        "#8B0000",
-        "#FF4500",
-        "#FFD700",
-        "#ADFF2F",
-        "#006400"
+        "#3d1f0f",   # solo escuro
+        "#8c510a",   # solo
+        "#d8b365",   # solo claro
+        "#f6e8c3",   # transição
+        "#c7e9ad",   # vegetação leve
+        "#74c476",   # vegetação média
+        "#238b45",   # vegetação forte
+        "#00441b"    # floresta densa
     ]
 )
 
@@ -294,8 +334,8 @@ cores_ndvi = LinearSegmentedColormap.from_list(
 img1 = axes[0].imshow(
     ndvi_2023,
     cmap=cores_ndvi,
-    vmin=np.nanpercentile(ndvi_2023, 5),
-    vmax=np.nanpercentile(ndvi_2023, 95)
+    vmin=-0.2,
+    vmax=0.9
 )
 
 axes[0].set_title("NDVI 2023")
@@ -314,8 +354,8 @@ plt.colorbar(
 img2 = axes[1].imshow(
     ndvi_2024,
     cmap=cores_ndvi,
-    vmin=np.nanpercentile(ndvi_2024, 5),
-    vmax=np.nanpercentile(ndvi_2024, 95)
+    vmin=-0.2,
+    vmax=0.9
 )
 
 axes[1].set_title("NDVI 2024")
@@ -348,7 +388,7 @@ plt.colorbar(
 )
 
 # ======================================================
-# MAPA COLORIDO DE MUDANÇAS
+# MAPA DE MUDANÇA
 # ======================================================
 
 change_map = np.zeros(ndvi_diff.shape)
@@ -372,6 +412,24 @@ axes[3].axis("off")
 plt.colorbar(
     img4,
     ax=axes[3],
+    fraction=0.046
+)
+
+# ======================================================
+# VEGETAÇÃO PERDIDA
+# ======================================================
+
+img5 = axes[4].imshow(
+    trees_lost.astype(np.uint8) * 255,
+    cmap="Reds"
+)
+
+axes[4].set_title("Perda Vegetal Arbórea")
+axes[4].axis("off")
+
+plt.colorbar(
+    img5,
+    ax=axes[4],
     fraction=0.046
 )
 
