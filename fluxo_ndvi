@@ -199,8 +199,8 @@ cores_ndvi = LinearSegmentedColormap.from_list(
 img1 = axes[0].imshow(
     ndvi_2023,
     cmap=cores_ndvi,
-    vmin=0,
-    vmax=1
+    vmin=np.nanpercentile(ndvi_2023, 2),
+    vmax=np.nanpercentile(ndvi_2023, 98)
 )
 axes[0].set_title("NDVI 2023")
 axes[0].axis("off")
@@ -223,8 +223,8 @@ cores_ndvi = LinearSegmentedColormap.from_list(
 img1 = axes[1].imshow(
     ndvi_2024,
     cmap=cores_ndvi,
-    vmin=0,
-    vmax=1
+    vmin=np.nanpercentile(ndvi_2023, 2),
+    vmax=np.nanpercentile(ndvi_2023, 98)
 )
 axes[1].set_title("NDVI 2024")
 axes[0].axis("off")
@@ -256,6 +256,10 @@ axes[3].axis("off")
 
 plt.tight_layout()
 
-plt.show()
-
+plt.savefig(
+    r"C:\Users\raissa.alves\Documents\projeto\resultado_ndvi.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+print("Imagem salva!")
 print("\nProcessamento concluído!")
